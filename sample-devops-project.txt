@@ -1,0 +1,471 @@
+Simple DevOps Project: Step-by-Step Guide
+🎯 What We're Building
+We'll build a simple web application with:
+
+A basic Node.js web app
+Deploy it to AWS using Terraform
+Set up automated deployment with GitHub Actions
+Add monitoring to see how it's performing
+Create troubleshooting guides
+
+Think of it like building a small online store that can handle traffic and tells us when something goes wrong.
+
+📚 Prerequisites
+Before we start, make sure you have:
+
+An AWS account (free tier is fine)
+A GitHub account
+Basic command line knowledge
+
+
+🚀 Step 1: Create a Simple Web Application
+Let's start with a basic Node.js app that we can actually understand.
+1.1: Create Your Project Folder
+bashmkdir simple-devops-project
+cd simple-devops-project
+1.2: Create a Simple Web App
+Create a file called app.js:
+javascriptconst express = require('express');
+const app = express();
+const port = 3000;
+
+// A simple counter to show our app is working
+let visitCount = 0;
+
+// Main page
+app.get('/', (req, res) => {
+  visitCount++;
+  res.send(`
+    <h1>Hello DevOps World!</h1>
+    <p>This page has been visited ${visitCount} times</p>
+    <p>Server time: ${new Date()}</p>
+  `);
+});
+
+// Health check - important for monitoring
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    uptime: process.uptime(),
+    visits: visitCount
+  });
+});
+
+app.listen(port, () => {
+  console.log(`App running at http://localhost:${port}`);
+});
+Create package.json:
+json{
+  "name": "simple-devops-app",
+  "version": "1.0.0",
+  "description": "A simple app to learn DevOps",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
+1.3: Test Your App Locally
+bash# Install dependencies
+npm install
+
+# Run the app
+npm start
+Visit http://localhost:3000 - you should see your page!
+
+🐳 Step 2: Containerize Your App
+Now let's put our app in a Docker container so it can run anywhere.
+2.1: Create a Dockerfile
+Create a file called Dockerfile:
+dockerfile# Start with a Node.js image
+FROM node:18-alpine
+
+# Create app directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy app source
+COPY . .
+
+# Expose port
+EXPOSE 3000
+
+# Start the app
+CMD ["npm", "start"]
+2.2: Build and Test the Container
+bash# Build the Docker image
+docker build -t my-simple-app .
+
+# Run the container
+docker run -p 3000:3000 my-simple-app
+Visit http://localhost:3000 again - it should work the same way!
+
+☁️ Step 3: Deploy to AWS with Terraform (Simple Version)
+Let's create the infrastructure to run our app in the cloud.
+3.1: Install Terraform
+bash# On macOS
+brew install terraform
+
+# On Ubuntu/Debian
+curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+sudo apt-get update && sudo apt-get install terraform
+3.2: Create Simple Infrastructure
+Create a folder called infrastructure and add main.tf:
+hcl# Configure AWS provider
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"  # Change this to your preferred region
+}
+
+# Create a security group for our app
+resource "aws_security_group" "app_sg" {
+  name_prefix = "simple-app-sg"
+
+  # Allow HTTP traffic
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow SSH (for troubleshooting)
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]  # In production, restrict this!
+  }
+
+  # Allow all outbound traffic
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "simple-app-security-group"
+  }
+}
+
+# Create an EC2 instance to run our app
+resource "aws_instance" "app_server" {
+  ami           = "ami-0c02fb55956c7d316"  # Amazon Linux 2
+  instance_type = "t2.micro"  # Free tier eligible
+  
+  security_groups = [aws_security_group.app_sg.name]
+
+  # Script to install Docker and run our app
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              yum install -y docker
+              service docker start
+              
+              # Add ec2-user to docker group
+              usermod -a -G docker ec2-user
+              
+              # Install Docker Compose
+              curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              chmod +x /usr/local/bin/docker-compose
+              
+              # We'll deploy our app here later
+              EOF
+
+  tags = {
+    Name = "simple-app-server"
+  }
+}
+
+# Output the public IP so we can access our app
+output "app_server_ip" {
+  value = aws_instance.app_server.public_ip
+  description = "Public IP address of the app server"
+}
+
+output "app_url" {
+  value = "http://${aws_instance.app_server.public_ip}"
+  description = "URL to access the application"
+}
+3.3: Deploy the Infrastructure
+bashcd infrastructure
+
+# Initialize Terraform
+terraform init
+
+# See what will be created
+terraform plan
+
+# Create the infrastructure
+terraform apply
+Type "yes" when prompted. After a few minutes, you'll see the IP address of your server!
+
+🔄 Step 4: Set Up GitHub Actions (Simple CI/CD)
+Let's automate deployment so when you push code, it automatically updates your app.
+4.1: Create GitHub Repository
+bash# Initialize git in your project
+git init
+git add .
+git commit -m "Initial commit"
+
+# Create repository on GitHub and push
+git branch -M main
+git remote add origin https://github.com/YOUR_USERNAME/simple-devops-project.git
+git push -u origin main
+4.2: Create GitHub Actions Workflow
+Create .github/workflows/deploy.yml:
+yamlname: Deploy Simple App
+
+# Run this workflow when we push to main branch
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Get our code
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # Build our Docker image
+    - name: Build Docker image
+      run: |
+        docker build -t simple-app:latest .
+        docker save simple-app:latest | gzip > simple-app.tar.gz
+
+    # Copy to our server and deploy
+    - name: Deploy to server
+      env:
+        SERVER_IP: ${{ secrets.SERVER_IP }}
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      run: |
+        # This is a simplified version
+        # In a real project, we'd use proper deployment tools
+        echo "Deployment step - we'll implement this next"
+4.3: Set Up Secrets
+In your GitHub repository:
+
+Go to Settings → Secrets and Variables → Actions
+Add these secrets:
+
+SERVER_IP: Your EC2 instance IP
+SSH_PRIVATE_KEY: Your EC2 key pair private key
+
+
+
+
+📊 Step 5: Add Simple Monitoring
+Let's add basic monitoring to see how our app is performing.
+5.1: Update App with Metrics
+Update your app.js to include basic metrics:
+javascriptconst express = require('express');
+const app = express();
+const port = 3000;
+
+// Simple metrics
+let visitCount = 0;
+let startTime = Date.now();
+let errors = 0;
+
+// Middleware to log requests
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Main page
+app.get('/', (req, res) => {
+  visitCount++;
+  res.send(`
+    <h1>Hello DevOps World!</h1>
+    <p>This page has been visited ${visitCount} times</p>
+    <p>Server time: ${new Date()}</p>
+    <a href="/metrics">View Metrics</a>
+  `);
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    visits: visitCount,
+    errors: errors
+  });
+});
+
+// Simple metrics endpoint
+app.get('/metrics', (req, res) => {
+  const uptime = Math.floor((Date.now() - startTime) / 1000);
+  res.json({
+    uptime_seconds: uptime,
+    total_visits: visitCount,
+    total_errors: errors,
+    memory_usage: process.memoryUsage(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Error endpoint for testing
+app.get('/error', (req, res) => {
+  errors++;
+  res.status(500).send('This is a test error!');
+});
+
+app.listen(port, () => {
+  console.log(`App running at http://localhost:${port}`);
+});
+5.2: Create a Simple Monitoring Script
+Create monitor.sh:
+bash#!/bin/bash
+
+# Simple monitoring script
+APP_URL="http://YOUR_SERVER_IP"
+
+echo "=== Simple App Monitoring ===="
+echo "Time: $(date)"
+
+# Check if app is responding
+if curl -f -s "$APP_URL/health" > /dev/null; then
+    echo "✅ App is healthy"
+    
+    # Get metrics
+    echo "📊 Current metrics:"
+    curl -s "$APP_URL/metrics" | python3 -m json.tool
+else
+    echo "❌ App is not responding!"
+    echo "🔧 Checking server status..."
+    
+    # Add basic troubleshooting
+    ping -c 1 YOUR_SERVER_IP
+fi
+
+echo "======================="
+
+🔧 Step 6: Basic Troubleshooting Runbook
+Here's a simple guide for when things go wrong:
+6.1: Common Issues and Solutions
+Problem: Can't access the website
+
+Check if the server is running:
+bashping YOUR_SERVER_IP
+
+Check if the app is running on the server:
+bashssh ec2-user@YOUR_SERVER_IP
+docker ps
+
+Check the application logs:
+bashdocker logs CONTAINER_ID
+
+
+Problem: App is slow or not responding
+
+Check server resources:
+bashssh ec2-user@YOUR_SERVER_IP
+top
+df -h
+
+Check application metrics:
+bashcurl YOUR_SERVER_IP/metrics
+
+Restart the application:
+bashdocker restart CONTAINER_ID
+
+
+Problem: Deployment failed
+
+Check GitHub Actions logs in your repository
+Verify AWS credentials and permissions
+Check if Terraform state is corrupted:
+bashcd infrastructure
+terraform plan
+
+
+6.2: Monitoring Checklist
+Daily checks:
+
+ App responds to health check
+ Server disk space < 80%
+ No error spikes in logs
+ Response time < 2 seconds
+
+Weekly checks:
+
+ Security updates applied
+ Backup verification
+ Performance trending
+
+
+🎉 Step 7: Testing Everything
+Let's make sure everything works:
+
+Test the app locally:
+bashnpm start
+curl http://localhost:3000/health
+
+Test infrastructure:
+bashcd infrastructure
+terraform plan
+
+Test deployment:
+
+Make a small change to your app
+Push to GitHub
+Watch GitHub Actions run
+Check if the change appears on your server
+
+
+Test monitoring:
+bashcurl YOUR_SERVER_IP/metrics
+
+
+
+🚀 Next Steps (Once You Master This)
+After you're comfortable with this simple setup, you can gradually add:
+
+Better Container Orchestration: Replace single EC2 with Kubernetes
+Better Monitoring: Add Prometheus and Grafana
+Better Security: Add HTTPS, proper security groups
+Better Deployment: Add blue-green deployments
+Better Testing: Add automated tests in CI/CD
+
+
+📖 Key Concepts You've Learned
+
+Infrastructure as Code: Using Terraform to create repeatable infrastructure
+Containerization: Using Docker to package applications
+CI/CD: Automating deployment with GitHub Actions
+Monitoring: Adding health checks and metrics
+Troubleshooting: Creating runbooks for common issues
+
+This foundation will help you understand more complex DevOps concepts as you grow!
+
+🆘 Getting Help
+If you get stuck:
+
+Check the application logs
+Review the troubleshooting section
+Try the monitoring endpoints
+Check AWS CloudWatch logs
+Review GitHub Actions logs
