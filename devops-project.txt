@@ -1,0 +1,749 @@
+Complete DevOps Pipeline: AWS + GitHub + Jenkins + Ansible + Docker + Kubernetes + Terraform
+Project Overview
+This guide walks you through building a complete DevOps pipeline that includes:
+
+Infrastructure as Code with Terraform
+Containerization with Docker
+Orchestration with Kubernetes (EKS)
+Configuration Management with Ansible
+CI/CD Pipeline with Jenkins
+Source Control with GitHub
+Cloud Platform with AWS
+
+Prerequisites
+
+AWS Account with appropriate IAM permissions
+GitHub account
+Basic knowledge of Linux commands
+Understanding of containerization concepts
+
+Project Architecture
+GitHub Repository → Jenkins → Docker Build → Ansible Configuration → Kubernetes Deployment on AWS EKS
+Step 1: Setting Up AWS Infrastructure with Terraform
+1.1 Install Terraform
+bash# Download and install Terraform
+curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+sudo apt-get update && sudo apt-get install terraform
+1.2 Create Terraform Configuration
+Create a directory structure:
+bashmkdir devops-pipeline
+cd devops-pipeline
+mkdir terraform
+cd terraform
+main.tf:
+hcl# Configure AWS Provider
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# VPC Configuration
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "devops-vpc"
+  }
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "devops-igw"
+  }
+}
+
+# Public Subnets
+resource "aws_subnet" "public" {
+  count = 2
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.${count.index + 1}.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "public-subnet-${count.index + 1}"
+  }
+}
+
+# Private Subnets
+resource "aws_subnet" "private" {
+  count = 2
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
+  tags = {
+    Name = "private-subnet-${count.index + 1}"
+  }
+}
+
+# Data source for availability zones
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Route Table for Public Subnets
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "public-rt"
+  }
+}
+
+# Associate Public Subnets with Route Table
+resource "aws_route_table_association" "public" {
+  count = 2
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# Security Group for Jenkins
+resource "aws_security_group" "jenkins" {
+  name_prefix = "jenkins-sg"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "jenkins-security-group"
+  }
+}
+
+# EC2 Instance for Jenkins
+resource "aws_instance" "jenkins" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t3.medium"
+  key_name      = var.key_pair_name
+
+  vpc_security_group_ids = [aws_security_group.jenkins.id]
+  subnet_id              = aws_subnet.public[0].id
+
+  user_data = file("jenkins-install.sh")
+
+  tags = {
+    Name = "jenkins-server"
+  }
+}
+
+# Data source for Ubuntu AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-20.04-amd64-server-*"]
+  }
+}
+
+# EKS Cluster
+resource "aws_eks_cluster" "main" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = "1.27"
+
+  vpc_config {
+    subnet_ids = concat(aws_subnet.public[*].id, aws_subnet.private[*].id)
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+  ]
+
+  tags = {
+    Name = "devops-eks-cluster"
+  }
+}
+
+# EKS Node Group
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "devops-nodes"
+  node_role_arn   = aws_iam_role.eks_node_group.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  scaling_config {
+    desired_size = 2
+    max_size     = 4
+    min_size     = 1
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  instance_types = ["t3.medium"]
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_container_registry_policy,
+  ]
+
+  tags = {
+    Name = "devops-node-group"
+  }
+}
+
+# IAM Roles and Policies (see separate file)
+variables.tf:
+hclvariable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-west-2"
+}
+
+variable "cluster_name" {
+  description = "EKS cluster name"
+  type        = string
+  default     = "devops-cluster"
+}
+
+variable "key_pair_name" {
+  description = "EC2 Key Pair name"
+  type        = string
+}
+iam.tf:
+hcl# EKS Cluster IAM Role
+resource "aws_iam_role" "eks_cluster" {
+  name = "eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+# EKS Node Group IAM Role
+resource "aws_iam_role" "eks_node_group" {
+  name = "eks-node-group-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_container_registry_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.eks_node_group.name
+}
+jenkins-install.sh:
+bash#!/bin/bash
+apt-get update
+apt-get install -y openjdk-11-jdk
+
+# Install Docker
+apt-get install -y docker.io
+systemctl start docker
+systemctl enable docker
+
+# Install Jenkins
+wget -q -O - https://pkg.jenkins.io/debian/jenkins.io.key | apt-key add -
+echo deb https://pkg.jenkins.io/debian binary/ > /etc/apt/sources.list.d/jenkins.list
+apt-get update
+apt-get install -y jenkins
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# Install AWS CLI
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+./aws/install
+
+# Add jenkins user to docker group
+usermod -aG docker jenkins
+systemctl restart jenkins
+1.3 Deploy Infrastructure
+bash# Initialize Terraform
+terraform init
+
+# Plan the deployment
+terraform plan -var="key_pair_name=your-key-pair-name"
+
+# Apply the configuration
+terraform apply -var="key_pair_name=your-key-pair-name"
+Step 2: Setting Up GitHub Repository
+2.1 Create Repository Structure
+bashmkdir sample-app
+cd sample-app
+git init
+Create the following directory structure:
+sample-app/
+├── src/
+│   └── app.js
+├── Dockerfile
+├── k8s/
+│   ├── deployment.yaml
+│   └── service.yaml
+├── ansible/
+│   └── playbook.yml
+├── Jenkinsfile
+└── package.json
+2.2 Sample Application (Node.js)
+package.json:
+json{
+  "name": "sample-devops-app",
+  "version": "1.0.0",
+  "description": "Sample app for DevOps pipeline",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "echo \"No tests specified\""
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
+src/app.js:
+javascriptconst express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Hello from DevOps Pipeline!',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'healthy' });
+});
+
+app.listen(port, () => {
+  console.log(`App running on port ${port}`);
+});
+2.3 Dockerfile
+Dockerfile:
+dockerfile# Multi-stage build for optimized image
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:18-alpine AS runtime
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001
+
+WORKDIR /app
+
+# Copy dependencies and source code
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --chown=nextjs:nodejs src/ ./src/
+COPY --chown=nextjs:nodejs package.json ./
+
+USER nextjs
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
+Step 3: Kubernetes Manifests
+3.1 Deployment Configuration
+k8s/deployment.yaml:
+yamlapiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  labels:
+    app: sample-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      containers:
+      - name: sample-app
+        image: DOCKER_IMAGE_PLACEHOLDER
+        ports:
+        - containerPort: 3000
+        env:
+        - name: PORT
+          value: "3000"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+3.2 Service Configuration
+k8s/service.yaml:
+yamlapiVersion: v1
+kind: Service
+metadata:
+  name: sample-app-service
+spec:
+  selector:
+    app: sample-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: LoadBalancer
+Step 4: Ansible Configuration
+4.1 Ansible Playbook
+ansible/playbook.yml:
+yaml---
+- name: Configure Kubernetes cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    docker_image: "{{ docker_image_name }}"
+    
+  tasks:
+    - name: Update kubeconfig
+      shell: |
+        aws eks update-kubeconfig --region us-west-2 --name devops-cluster
+      
+    - name: Replace image placeholder in deployment
+      replace:
+        path: k8s/deployment.yaml
+        regexp: 'DOCKER_IMAGE_PLACEHOLDER'
+        replace: "{{ docker_image }}"
+    
+    - name: Apply Kubernetes deployment
+      kubernetes.core.k8s:
+        state: present
+        src: k8s/deployment.yaml
+        
+    - name: Apply Kubernetes service
+      kubernetes.core.k8s:
+        state: present
+        src: k8s/service.yaml
+        
+    - name: Wait for deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: sample-app
+        namespace: default
+        wait: true
+        wait_condition:
+          type: Progressing
+          status: "True"
+        wait_timeout: 300
+4.2 Ansible Requirements
+ansible/requirements.yml:
+yaml---
+collections:
+  - name: kubernetes.core
+    version: ">=2.3.0"
+  - name: amazon.aws
+    version: ">=5.0.0"
+Step 5: Jenkins Pipeline
+5.1 Jenkinsfile
+Jenkinsfile:
+groovypipeline {
+    agent any
+    
+    environment {
+        AWS_DEFAULT_REGION = 'us-west-2'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        IMAGE_REPO_NAME = 'sample-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        DOCKER_IMAGE = "${ECR_REGISTRY}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"
+        CLUSTER_NAME = 'devops-cluster'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.build("${IMAGE_REPO_NAME}:${IMAGE_TAG}")
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                script {
+                    sh '''
+                        docker run --rm ${IMAGE_REPO_NAME}:${IMAGE_TAG} npm test
+                    '''
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            steps {
+                script {
+                    sh '''
+                        # Login to ECR
+                        aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        
+                        # Create repository if it doesn't exist
+                        aws ecr describe-repositories --repository-names ${IMAGE_REPO_NAME} || aws ecr create-repository --repository-name ${IMAGE_REPO_NAME}
+                        
+                        # Tag and push image
+                        docker tag ${IMAGE_REPO_NAME}:${IMAGE_TAG} ${DOCKER_IMAGE}
+                        docker push ${DOCKER_IMAGE}
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy with Ansible') {
+            steps {
+                script {
+                    sh '''
+                        # Install Ansible collections
+                        ansible-galaxy collection install -r ansible/requirements.yml
+                        
+                        # Run Ansible playbook
+                        ansible-playbook ansible/playbook.yml -e docker_image_name=${DOCKER_IMAGE}
+                    '''
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    sh '''
+                        # Wait for pods to be ready
+                        kubectl wait --for=condition=ready pod -l app=sample-app --timeout=300s
+                        
+                        # Get service URL
+                        kubectl get service sample-app-service
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'Pipeline succeeded!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
+Step 6: Jenkins Setup and Configuration
+6.1 Initial Jenkins Setup
+
+Access Jenkins:
+
+bash   # Get Jenkins initial admin password
+   sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+
+Install Required Plugins:
+
+Docker Pipeline
+Kubernetes
+AWS Steps
+Ansible
+GitHub Integration
+
+
+
+6.2 Configure Jenkins Credentials
+Add the following credentials in Jenkins:
+
+AWS credentials (Access Key and Secret Key)
+GitHub personal access token
+Docker registry credentials
+
+6.3 Configure Jenkins Pipeline Job
+
+Create new Pipeline job
+Configure GitHub webhook trigger
+Set pipeline script from SCM (GitHub)
+
+Step 7: Complete Deployment Process
+7.1 Push Code to GitHub
+bashgit add .
+git commit -m "Initial DevOps pipeline setup"
+git branch -M main
+git remote add origin https://github.com/yourusername/sample-app.git
+git push -u origin main
+7.2 Configure Webhook
+
+Go to GitHub repository settings
+Add webhook: http://jenkins-server-ip:8080/github-webhook/
+Select push events
+
+7.3 Trigger Pipeline
+The pipeline will automatically trigger on code push, or you can manually trigger it from Jenkins.
+Step 8: Monitoring and Validation
+8.1 Check Deployment Status
+bash# Check pods
+kubectl get pods
+
+# Check services
+kubectl get services
+
+# Check deployment status
+kubectl rollout status deployment/sample-app
+8.2 Access Application
+bash# Get LoadBalancer URL
+kubectl get service sample-app-service
+
+# Test application
+curl http://<load-balancer-url>/
+Step 9: Cleanup (Optional)
+To clean up all resources:
+bash# Delete Kubernetes resources
+kubectl delete -f k8s/
+
+# Destroy Terraform infrastructure
+terraform destroy
+Best Practices Implemented
+
+Security:
+
+Non-root container user
+Resource limits and requests
+Health checks
+Private subnets for worker nodes
+
+
+Scalability:
+
+Auto-scaling node groups
+Multiple availability zones
+LoadBalancer service type
+
+
+Reliability:
+
+Multi-stage Docker builds
+Health probes
+Rolling updates
+Infrastructure as Code
+
+
+Monitoring:
+
+Application health endpoints
+Kubernetes native monitoring
+Pipeline status notifications
+
+
+
+Troubleshooting
+Common Issues:
+
+Jenkins can't connect to EKS:
+
+Ensure IAM roles have correct permissions
+Update kubeconfig: aws eks update-kubeconfig --name devops-cluster
+
+
+Docker permission issues:
+
+Add jenkins user to docker group: sudo usermod -aG docker jenkins
+
+
+Ansible connection issues:
+
+Verify AWS credentials
+Check kubectl configuration
